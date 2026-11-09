@@ -1,17 +1,19 @@
 # Read Only File System Extractor
 
-RofsExtractor is a command-line utility for listing and extracting files from Symbian ROM images and raw firmware dumps. It supports ordinary bare ROM images, embedded ROM images, NAND dumps with out-of-band data, and raw NOR dumps whose physical regions use different runtime address mappings.
+RofsExtractor is a command-line utility for listing and extracting files from Symbian ARM ROM, ROFS, and ROFx images. It can read images at a known offset, scan larger firmware dumps for an embedded image, and strip interleaved NAND out-of-band (OOB) data before parsing.
 
 ## Features
 
-- List the complete Symbian ROM directory tree without extracting files.
+- List ROM, ROFS, and ROFx directory entries without extracting files.
 - Extract all files or only paths matching a case-insensitive substring.
-- Read plain and EPOC loader-wrapped ROM images.
-- Scan a larger firmware file for an embedded Symbian ROM image.
+- Read plain ARM ROM images and ROFS/ROFx images.
+- Scan a larger firmware file for an embedded ROM/ROFS/ROFx image.
 - Decode uncompressed and BytePair-compressed demand-paged ROM data.
 - Strip interleaved NAND OOB data before parsing the ROM.
-- Automatically reconstruct multi-region virtual-to-physical mappings in supported raw NOR dumps.
-- Preserve the ROM directory structure and include the ROM image header when extracting executables and DLLs.
+- Select a ROM hardware variant when the image contains multiple root directories.
+- Preserve directories, including empty directories when included in the selection.
+- Include recognized ROM executable/DLL module headers in extracted files.
+- Validate output paths and escape filenames that are incompatible with Windows.
 
 ## Requirements
 
@@ -32,7 +34,7 @@ List the files and directories in a ROM image:
 python3 RofsExtractor.py list rom.bin
 ```
 
-Extract the complete ROM image to the default `extracted` directory:
+Extract all files to the default `rofs_extracted` directory:
 
 ```bash
 python3 RofsExtractor.py extract rom.bin
@@ -52,24 +54,25 @@ python3 RofsExtractor.py extract rom.bin \
   --output system_binaries
 ```
 
-The `--pattern` comparison is case-insensitive and is applied to the complete path stored in the ROM.
+The `--pattern` comparison is case-insensitive and is applied to the complete image path. It filters directory entries as well as files; parent directories needed for matching files are still created.
 
 Use `--help` with `list` or `extract` for all available options.
 
 ## Image Workflows
 
-### 1. Plain Bare ROM
+### 1. Plain ROM, ROFS, or ROFx
 
-If the ROM header begins at offset zero, no additional options are required:
+If the image header begins at offset zero, no additional options are required. The format is detected automatically:
 
 ```bash
 python3 RofsExtractor.py list rom.bin
 python3 RofsExtractor.py extract rom.bin --output extracted
+python3 RofsExtractor.py extract rofs.bin --output rofs_extracted
 ```
 
-### 2. Embedded ROM
+### 2. Embedded Image
 
-If the exact ROM offset is known, pass it as a decimal or `0x`-prefixed hexadecimal value:
+If the exact header offset is known, pass it as a decimal or `0x`-prefixed hexadecimal value:
 
 ```bash
 python3 RofsExtractor.py extract firmware.bin \
@@ -85,20 +88,18 @@ python3 RofsExtractor.py extract firmware.bin \
   --output extracted
 ```
 
-Scanning checks candidate ROM headers and selects the candidate with the most plausible directory tree.
+Scanning validates candidate headers and directory trees, samples file data, and selects the highest-scoring image. It selects one image per invocation, rather than extracting every image in a dump. With `--scan`, `--offset` is not used.
 
-### 3. Raw NOR Dump
+### 3. ROM Hardware Variants
 
-Raw NOR dumps may contain several physical regions whose directory entries refer to different runtime virtual address ranges. The tool detects these mappings from valid ROM-resident E32 executable headers, locates the root directory, and joins files that cross mapping boundaries.
-
-No manual mapping options are required:
+ROM images with a single root variant are selected automatically. If multiple variants exist, specify the hardware variant ID:
 
 ```bash
-python3 RofsExtractor.py list dump_nor.bin
-python3 RofsExtractor.py extract dump_nor.bin --output extracted
+python3 RofsExtractor.py list rom.bin --variant 0x12345678
+python3 RofsExtractor.py extract rom.bin --variant 0x12345678 --output extracted
 ```
 
-When detection succeeds, the first line of `list` output shows the root directory offset and the recovered mappings.
+Replace the example ID with the variant ID from your image. `--variant` applies only to ROM images, not ROFS/ROFx. The first line of ROM `list` output includes the image offset, runtime base, virtual image size, selected root address, and variant ID.
 
 ### 4. NAND Dump with OOB Data
 
@@ -114,9 +115,11 @@ python3 RofsExtractor.py extract dump_nand.bin \
 
 `--nand-page-size` and `--nand-oob-size` must always be used together. These options only remove OOB bytes; they do not reconstruct an FTL or correct NAND ECC errors.
 
+When OOB stripping is enabled, `--offset` refers to the resulting data stream after OOB removal.
+
 ### 5. Damaged BytePair Pages
 
-By default, extraction stops when a corrupt BytePair-compressed page is encountered. To continue recovery, replace each corrupt page with zeroes:
+By default, extraction stops when an invalid pageable ROM payload page is encountered, including a corrupt BytePair-compressed page. To continue recovery, enable zero substitution:
 
 ```bash
 python3 RofsExtractor.py extract rom.bin \
@@ -124,10 +127,10 @@ python3 RofsExtractor.py extract rom.bin \
   --output recovered
 ```
 
-The tool prints a warning for every substituted page. Files using those pages may be incomplete or unusable.
+This option applies only to ROM images. It is enabled after directory parsing, so it cannot bypass errors encountered while opening, scanning, or listing the directory tree. It also does not recover truncated unpaged data. The tool warns when substituting a page and reports the number of distinct corrupt pages after extraction. Files using those pages may be incomplete or unusable.
 
-## Warning
+## Output Names and Validation
 
-Treat extracted files as recovery output until they have been validated. Heuristic scanning and raw NOR mapping detection depend on consistent headers and directory metadata; damaged or partial dumps may produce missing files or fail detection.
+Names containing Windows-special characters, control characters, percent signs, or trailing dots/spaces are escaped as `%XXXX`; reserved device names receive a `%RESERVED%` prefix. This naming policy is used on every host platform. The `list` command and `--pattern` filter use the original image names.
 
-`--ignore-corrupt-pages` deliberately replaces unreadable data with zeroes. It is useful for best-effort recovery, but it does not repair the affected executable or resource data.
+Invalid UTF-16 names, unsafe path components, output paths escaping the destination, case-insensitive output name collisions, and attempts to overwrite the input image are rejected. Extraction creates parent directories as needed and may overwrite existing output files. An error stops extraction; files already written remain in the destination.
